@@ -1,10 +1,13 @@
 import requests
 import json
 import pandas as pd
+import os
+from dotenv import load_dotenv
 
 # BLS API 정보
 BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
-API_KEY = "5d3925abd2704b209edee384dc287688"  # 본인의 BLS Registration Key 입력
+load_dotenv()
+API_KEY = os.getenv("BLS_API_KEY")
 
 START_YEAR = 2022
 END_YEAR = 2025
@@ -18,7 +21,7 @@ def fetch_cpi_data(start_year, end_year, api_key):
         "endyear": str(end_year),
         "registrationkey": api_key
     })
-    response = requests.post(BLS_API_URL, headers=headers, data=data)
+    response = requests.post(BLS_API_URL, headers=headers, data=data, timeout=30)
     response.raise_for_status()
     result = response.json()
     if result.get("status") != "REQUEST_SUCCEEDED":

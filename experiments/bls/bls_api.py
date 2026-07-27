@@ -1,7 +1,10 @@
 import requests
 import json
-import os_env
-api_key = os_env.get_bls_api_key()
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+api_key = os.getenv("BLS_API_KEY")
 # BLS API URL (예: 버전 2)
 url = 'https://api.bls.gov/publicAPI/v2/timeseries/data/'
 

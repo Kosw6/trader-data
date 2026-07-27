@@ -1,0 +1,91 @@
+# trader-controller의 LOCAL_DOCKER target이 켜고 끌 로컬 Python worker compose입니다.
+# V013 seed 데이터의 composeFile/serviceName과 맞추기 위해 파일명과 서비스명을 고정합니다.
+#
+# 기본 실행:
+#   docker compose -f docker-compose.local-worker.yml up -d trader-python-worker
+#
+# 특정 worker 모듈로 실행하고 싶을 때:
+#   $env:WORKER_MODULE="workers.kis_price_etl_worker"
+#   docker compose -f docker-compose.local-worker.yml up -d --force-recreate trader-python-worker
+
+name: trader-data-local-worker
+
+services:
+  trader-python-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trader-data-worker:local
+    container_name: trader-python-worker
+    working_dir: /app
+
+    # 소스 코드는 로컬 디렉터리를 그대로 마운트합니다.
+    # 아직은 개발/검증 단계라 image build보다 코드 수정 반영이 빠른 bind mount 방식을 사용합니다.
+    volumes:
+      - ./:/app
+      - ./pipeline_output:/app/pipeline_output
+
+    # trader-data/.env를 그대로 읽습니다.
+    # 단, 컨테이너 내부의 localhost는 호스트 PC가 아니므로 아래 command에서 접속 주소를 보정합니다.
+    env_file:
+      - .env
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "/app"
+
+      # 기본은 기존 JOB_ITEM_QUEUED consumer입니다.
+      # 예: workers.kis_price_etl_worker, workers.bls_macro_etl_worker, workers.sec_financial_etl_worker
+      WORKER_MODULE: "${WORKER_MODULE:-workers.kafka_pipeline_consumer}"
+
+      # 필요하면 worker별 인자를 주입합니다. 비워두면 각 worker가 환경변수 기본값을 사용합니다.
+      # 예: --max-records 1
+      WORKER_ARGS: "${WORKER_ARGS:-}"
+
+      # Kafka는 trader-controller-net 내부 listener를 사용합니다.
+      # 호스트 PowerShell은 127.0.0.1:9092를 쓰고, 컨테이너 worker는 trader-kafka:29092를 씁니다.
+      KAFKA_BROKERS: "${WORKER_KAFKA_BROKERS:-trader-kafka:29092}"
+      KAFKA_TOPIC: "${WORKER_KAFKA_TOPIC:-trader.jobs.events}"
+      KAFKA_GROUP_ID: "${WORKER_KAFKA_GROUP_ID:-trader-data-workers}"
+      KAFKA_CONSUMER_NAME: "${WORKER_KAFKA_CONSUMER_NAME:-trader-data-worker}"
+
+      # RAW_OBJECT_READY topic도 compose에서 현재 계약값으로 고정합니다.
+      # 로컬 .env에 오래된 값이 남아 있어도 worker가 최신 topic을 바라보게 하기 위함입니다.
+      KAFKA_RAW_KIS_TOPIC: "${WORKER_KAFKA_RAW_KIS_TOPIC:-trader.raw.kis.ready}"
+      KAFKA_RAW_KIS_GROUP_ID: "${WORKER_KAFKA_RAW_KIS_GROUP_ID:-trader-data-kis-etl}"
+      KAFKA_RAW_KIS_CONSUMER_NAME: "${WORKER_KAFKA_RAW_KIS_CONSUMER_NAME:-kis-price-etl-worker}"
+      KAFKA_RAW_BLS_TOPIC: "${WORKER_KAFKA_RAW_BLS_TOPIC:-trader.raw.bls.ready}"
+      KAFKA_RAW_BLS_GROUP_ID: "${WORKER_KAFKA_RAW_BLS_GROUP_ID:-trader-data-bls-etl}"
+      KAFKA_RAW_BLS_CONSUMER_NAME: "${WORKER_KAFKA_RAW_BLS_CONSUMER_NAME:-bls-macro-etl-worker}"
+      KAFKA_RAW_SEC_TOPIC: "${WORKER_KAFKA_RAW_SEC_TOPIC:-trader.raw.sec.ready}"
+      KAFKA_RAW_SEC_GROUP_ID: "${WORKER_KAFKA_RAW_SEC_GROUP_ID:-trader-data-sec-etl}"
+      KAFKA_RAW_SEC_CONSUMER_NAME: "${WORKER_KAFKA_RAW_SEC_CONSUMER_NAME:-sec-financial-etl-worker}"
+
+      TRADER_CONTROLLER_URL: "${WORKER_CONTROLLER_URL:-http://host.docker.internal:8090}"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - controller-net
+
+    # 지금 단계에서는 worker node container를 켜고 끄는 로컬 actuator 검증이 목적입니다.
+    # pip install은 느리지만 Dockerfile 없이 compose 파일만으로 바로 실행하기 위한 선택입니다.
+    # 이후 운영 이미지가 필요해지면 Dockerfile로 의존성을 bake-in하면 됩니다.
+    command: |
+      /bin/sh -lc "
+      if [ -n \"$$DATABASE_URL\" ]; then
+        export DATABASE_URL=$$(printf '%s' \"$$DATABASE_URL\" | sed -e 's/@localhost:/@host.docker.internal:/g' -e 's/@127\\.0\\.0\\.1:/@host.docker.internal:/g');
+      fi;
+      echo '[trader-python-worker] module='$$WORKER_MODULE;
+      echo '[trader-python-worker] kafka='$$KAFKA_BROKERS;
+      echo '[trader-python-worker] controller='$$TRADER_CONTROLLER_URL;
+      exec python -m $$WORKER_MODULE $$WORKER_ARGS
+      "
+
+    # Go controller의 scale-in/scale-out 실험에서 stop 명령이 그대로 반영되도록 자동 재시작은 끕니다.
+    restart: "no"
+
+networks:
+  controller-net:
+    external: true
+    name: trader-controller-net

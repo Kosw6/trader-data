@@ -1,0 +1,10 @@
+.env
+.git
+.cache
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+pipeline_output/
+sec_sample_output/
+*.log

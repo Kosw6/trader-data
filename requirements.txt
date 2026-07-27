@@ -1,0 +1,7 @@
+beautifulsoup4
+feedparser
+icalendar
+kafka-python
+psycopg2-binary
+python-dotenv
+requests

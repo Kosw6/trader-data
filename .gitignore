@@ -1,55 +1,49 @@
-# ---------------------
-# Python 캐시/컴파일 파일
-# ---------------------
+# Python caches and compiled files
 __pycache__/
 *.py[cod]
 *$py.class
 
-# ---------------------
-# 가상환경 폴더
-# ---------------------
+# Virtual environments
+.venv/
 venv/
 env/
-.venv/
-.env/
-venv.bak/
 ENV/
+venv.bak/
 
-# ---------------------
-# 배포/빌드 결과물
-# ---------------------
+# Build and package output
 build/
 dist/
 *.egg-info/
 .eggs/
 
-# ---------------------
-# 테스트/커버리지 파일
-# ---------------------
+# Test and coverage output
 .pytest_cache/
 .coverage
 .coverage.*
-.cache
+.cache/
 nosetests.xml
 coverage.xml
 htmlcov/
 
-# ---------------------
-# IDE/에디터 설정
-# ---------------------
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.jks
+
+# Runtime data and logs
+pipeline_output/
+**/sec_sample_output/
+*.log
+
+# IDE and OS files
 .vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
-
-# ---------------------
-# OS 자동 생성 파일
-# ---------------------
 .DS_Store
 Thumbs.db
-
-# ---------------------
-# 환경 설정 파일 (민감정보)
-# ---------------------
-*.env
-.envrc
