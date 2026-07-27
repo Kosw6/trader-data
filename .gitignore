@@ -40,6 +40,9 @@ pipeline_output/
 **/sec_sample_output/
 *.log
 
+# Local design and validation documents
+docs/
+
 # IDE and OS files
 .vscode/
 .idea/
