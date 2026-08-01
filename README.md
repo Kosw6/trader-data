@@ -1,10 +1,10 @@
 # trader-data
 
-Data ingestion and backfill workspace for the Trader service.
+Trader 서비스의 데이터 수집, 변환, 백필 작업을 관리하는 저장소다.
 
 ## 디렉터리 구조
 
-| Directory | Responsibility |
+| 디렉터리 | 책임 |
 |---|---|
 | `collectors/` | 외부 API 호출과 원본 payload 수집을 담당한다. |
 | `transformers/` | provider payload를 우리 DB 스키마에 맞는 record로 변환한다. |
@@ -17,13 +17,14 @@ Data ingestion and backfill workspace for the Trader service.
 | `archive/` | 이전 MongoDB/KIS prototype 코드를 보관한다. |
 | `pipeline_output/` | 로컬에서 생성된 raw/report 파일을 저장한다. Git에는 올리지 않는다. |
 
-Keep `.env`, `.env.example`, `.gitignore`, and `requirements.txt` at the root.
-Run package commands from this directory with `python -m ...` so imports resolve
-consistently.
+`.env`, `.env.example`, `.gitignore`, `requirements.txt`는 프로젝트 루트에 둔다.
+모듈 경로를 일관되게 해석할 수 있도록 이 디렉터리에서 `python -m ...` 형식으로 실행한다.
 
 ## 수집과 ETL 책임 분리 방향
 
-현재 MVP에서는 SEC, KIS, BLS worker가 `COMBINED_COLLECT_TRANSFORM_LOAD` 방식으로 동작한다.
+현재 SEC, KIS, BLS Worker는 Combined와 Split 두 가지 실행 방식을 제공한다.
+
+Combined Worker는 `COMBINED_COLLECT_TRANSFORM_LOAD` 방식으로 한 프로세스에서 수집부터 DB 적재까지 수행한다.
 
 ```text
 pipeline_job_item
@@ -34,13 +35,13 @@ pipeline_job_item
   -> pipeline_job_item 최종 상태 기록
 ```
 
-이렇게 한 이유는 아직 스키마, 관리자 페이지, 수동 job 생성 흐름이 계속 바뀌는 단계이기 때문이다. 이 시점에 수집 프로세스와 ETL 프로세스를 완전히 분리하면 장애 지점과 디버깅 포인트가 급격히 늘어난다. 대신 worker checkpoint에 공통 `pipeline` 객체를 남겨 BLS, SEC, KIS가 같은 단계 이름으로 읽히도록 했다.
+Combined 방식은 간단한 기능 검증과 수동 운영에 사용한다. Worker checkpoint에는 공통 `pipeline` 객체를 남겨 BLS, SEC, KIS 처리 과정이 같은 단계 이름으로 보이도록 했다.
 
 ```text
 RESOLVE_TARGET -> COLLECT_RAW -> WRITE_RAW_PREVIEW -> TRANSFORM -> LOAD_DB
 ```
 
-다음 단계에서는 Python을 유지하되 프로세스 책임을 분리한다.
+운영형 검증에는 Python을 유지하면서 수집과 ETL의 실행 책임을 나눈 Split Worker를 사용한다.
 
 ```text
 Collector worker
@@ -55,25 +56,25 @@ ETL worker
   -> record_lineage
 ```
 
-Go controller는 ETL 실행 가능 시간을 결정한다. 예를 들어 장 마감 이후, 사용자 트래픽이 적은 시간대, 또는 Kafka lag/backlog가 기준치를 넘었을 때 ETL worker를 실행할 수 있다. Kafka에는 큰 원본 payload를 넣지 않고, `source_object_id`, `object_uri`, `job_item_id` 같은 작은 참조값만 넣는다.
+Go Controller는 Kafka lag, Worker 상태 신호, 처리 가능 시간대 등의 정책을 기준으로 Python Worker 실행 여부를 판단한다. Kafka에는 큰 원본 payload를 넣지 않고 `source_object_id`, `object_uri`, `job_item_id` 같은 작은 참조값만 넣는다.
 
-### 왜 처음부터 완전히 분리하지 않았나
+### 왜 Combined 방식도 함께 유지하는가
 
-지금 단계에서 바로 `collector worker -> RAW_OBJECT_READY -> ETL worker`로 나누지 않은 이유는 다음과 같다.
+Split 구조를 구현한 뒤에도 Combined 방식을 함께 유지하는 이유는 다음과 같다.
 
-1. **스키마와 관리자 기능이 아직 고정되는 중이다.**  
-   수집 결과를 어떤 테이블에 어떤 상태값으로 저장할지 바뀌는 동안 프로세스까지 분리하면 수정 비용이 커진다.
+1. **작은 범위의 기능 확인이 빠르다.**
+   외부 API 호출부터 DB 적재까지 한 프로세스에서 확인할 수 있어 Provider별 수집과 변환 문제를 빠르게 좁힐 수 있다.
 
-2. **장애 지점이 너무 빨리 늘어난다.**  
-   완전 분리 구조에서는 collector, raw storage, outbox, Kafka, ETL consumer, DB loader를 모두 동시에 봐야 한다. MVP 단계에서는 원인 추적이 어려워진다.
+2. **Split 구조와 비교할 기준이 된다.**
+   Collector, raw storage, Outbox, Kafka, ETL Consumer, DB Loader가 분리된 흐름과 한 프로세스 흐름을 같은 입력으로 비교할 수 있다.
 
-3. **현재 목표는 기능 완성보다 운영 경계 확정이다.**  
-   먼저 job/item, outbox, processed_event, checkpoint, 관리자 페이지 흐름을 안정화한 뒤 수집/ETL을 나누는 편이 더 안전하다.
+3. **Kafka 없이도 수동 복구와 검증이 가능하다.**
+   Broker를 사용할 수 없는 로컬 환경이나 단건 점검에서는 Combined Worker 또는 `--source-object-id` 직접 실행 경로를 사용할 수 있다.
 
-4. **Kafka lag 기준도 실제 데이터로 잡아야 한다.**  
-   KIS, SEC, BLS의 수집량과 DB 적재 시간을 먼저 관찰해야 source별 threshold를 현실적으로 정할 수 있다.
+4. **Provider별 처리량을 관찰할 수 있다.**
+   KIS, SEC, BLS의 수집량과 DB 적재 시간을 비교해 source별 lag 임계값과 batch 크기를 조정할 수 있다.
 
-따라서 현재 코드는 combined worker로 유지하되, checkpoint와 문서에서 stage boundary를 명확히 남기는 방식으로 갔다. 이후에는 같은 stage를 기준으로 `COLLECT_ONLY`, `ETL_ONLY` 모드로 나누면 된다.
+따라서 현재 코드는 Combined Worker를 단건 검증 경로로 유지하고, Split Worker를 원본 보존, 재처리, lag 기반 실행 제어를 검증하는 경로로 함께 제공한다.
 
 ## 원본 추적 모델
 
@@ -92,22 +93,21 @@ pipeline_job_item
 
 `source_object.pipeline_job_item_id`는 어떤 job item이 원본을 만들었는지 추적하기 위한 값이다. `record_lineage.target_record_key`는 DB PK가 달라져도 같은 결과 레코드를 다시 식별하기 위한 안정 키다.
 
-## Asset-Company matching
+## Asset-Company 연결
 
-Preview SEC-KIS exact matching without changing the database:
+DB를 변경하지 않고 SEC-KIS 정확 일치 결과를 미리 확인한다.
 
 ```powershell
 python -m backfills.asset_company_match_backfill
 ```
 
-Persist exact matches as reviewable candidates:
+정확히 일치한 결과를 검토 가능한 후보로 저장한다.
 
 ```powershell
 python -m backfills.asset_company_match_backfill --apply
 ```
 
-After inspecting candidate evidence in `/admin/data`, explicitly confirm all
-unambiguous one-to-one ticker and exchange matches:
+`/admin/data`에서 후보 근거를 확인한 뒤, ticker와 거래소가 명확하게 일대일로 일치하는 후보를 확정한다.
 
 ```powershell
 python -m backfills.asset_company_match_backfill `
@@ -115,17 +115,13 @@ python -m backfills.asset_company_match_backfill `
   --auto-confirm-exact
 ```
 
-The generator preserves existing `CONFIRMED` and `REJECTED` decisions. Identity
-collisions and Assets already linked to another Company remain
-`REVIEW_REQUIRED`.
+생성기는 기존 `CONFIRMED`, `REJECTED` 결정을 유지한다. 식별자가 충돌하거나 이미 다른 Company와 연결된 Asset은 `REVIEW_REQUIRED` 상태로 남긴다.
 
-## Legacy daily-price backfill
+## 기존 일봉 가격 백필
 
-The legacy `stock.timestamp` is already a `TIMESTAMPTZ` value such as
-`2024-06-14 09:00:00+09`, which is UTC midnight. The backfill copies it directly
-to `price_bar.bar_time` and executes database-side UPSERTs in 90-day windows.
+기존 `stock.timestamp`는 `2024-06-14 09:00:00+09`처럼 UTC 자정을 나타내는 `TIMESTAMPTZ` 값이다. 백필 작업은 이 값을 `price_bar.bar_time`으로 그대로 복사하고, DB에서 90일 단위로 UPSERT를 실행한다.
 
-Start with one symbol and one window:
+먼저 한 종목과 한 구간으로 확인한다.
 
 ```powershell
 python -m backfills.price_bar_backfill `
@@ -134,7 +130,7 @@ python -m backfills.price_bar_backfill `
   --symbol AAPL
 ```
 
-Apply the same smoke-test range after checking the counts:
+건수를 확인한 뒤 같은 점검 구간을 DB에 반영한다.
 
 ```powershell
 python -m backfills.price_bar_backfill `
@@ -144,32 +140,28 @@ python -m backfills.price_bar_backfill `
   --apply
 ```
 
-The full idempotent migration is:
+전체 멱등 이관은 다음 명령으로 실행한다.
 
 ```powershell
 python -m backfills.price_bar_backfill --all --apply
 ```
 
-Use `--limit-windows 1` to migrate only the first 90-day window. Each successful
-window commits independently, and `last_completed_end` can be reused as the
-next `--start` value after an interruption.
+`--limit-windows 1`을 사용하면 첫 90일 구간만 이관한다. 성공한 구간은 각각 독립적으로 커밋되며, 작업이 중단되면 `last_completed_end`를 다음 실행의 `--start` 값으로 사용할 수 있다.
 
-## Invalid daily-price repair
+## 잘못된 일봉 가격 복구
 
-The legacy KIS loader is preserved under `archive/legacy_kis/` for reference.
-The current repair flow separates provider HTTP concerns from database repair:
+기존 KIS Loader는 참고용으로 `archive/legacy_kis/`에 보관한다. 현재 복구 흐름은 Provider HTTP 처리와 DB 복구 책임을 다음과 같이 분리한다.
 
-- `collectors/kis_client.py`: KIS token, retry, throttling, pagination, parsing
-- `backfills/price_bar_invalid_repair.py`: invalid export, grouping, validation,
-  raw-response preservation, and idempotent `price_bar` UPSERT
+- `collectors/kis_client.py`: KIS 토큰, 재시도, 호출 제한, 페이지 순회, 응답 파싱
+- `backfills/price_bar_invalid_repair.py`: 잘못된 데이터 추출, 그룹화, 검증, 원본 응답 보존, 멱등 `price_bar` UPSERT
 
-Export all invalid legacy rows without calling KIS:
+KIS를 호출하지 않고 기존의 잘못된 행을 모두 추출한다.
 
 ```powershell
 python -m backfills.price_bar_invalid_repair
 ```
 
-Fetch one symbol and write comparison reports without changing the database:
+DB를 변경하지 않고 한 종목을 조회해 비교 보고서를 생성한다.
 
 ```powershell
 python -m backfills.price_bar_invalid_repair `
@@ -177,7 +169,7 @@ python -m backfills.price_bar_invalid_repair `
   --fetch
 ```
 
-Apply only values returned by KIS that pass the OHLCV checks:
+KIS가 반환한 값 중 OHLCV 검증을 통과한 값만 반영한다.
 
 ```powershell
 python -m backfills.price_bar_invalid_repair `
@@ -186,7 +178,7 @@ python -m backfills.price_bar_invalid_repair `
   --apply
 ```
 
-After reviewing several symbols, the complete repair can be explicitly enabled:
+여러 종목을 검토한 뒤 전체 복구를 명시적으로 실행한다.
 
 ```powershell
 python -m backfills.price_bar_invalid_repair `
@@ -195,61 +187,49 @@ python -m backfills.price_bar_invalid_repair `
   --apply
 ```
 
-Raw KIS pages are preserved under `pipeline_output/raw/kis/price_bar_repair`.
-CSV reports are written under `pipeline_output/reports/price_bar_invalid`.
-Filtered runs use a symbol-and-period subdirectory so they do not overwrite the
-complete invalid report.
-The job never fabricates high or low values: rows not returned by KIS or still
-violating OHLC rules remain in the repair report for later investigation.
+KIS 원본 응답은 `pipeline_output/raw/kis/price_bar_repair`에 보존한다. CSV 보고서는 `pipeline_output/reports/price_bar_invalid`에 저장한다. 필터를 적용한 실행은 종목과 기간별 하위 디렉터리를 사용하므로 전체 오류 보고서를 덮어쓰지 않는다.
 
-## Pipeline worker MVP
+이 작업은 고가나 저가를 임의로 만들지 않는다. KIS가 반환하지 않았거나 여전히 OHLC 규칙을 위반하는 행은 이후 확인할 수 있도록 복구 보고서에 남긴다.
 
-`workers/` contains the first worker-plane skeleton for jobs created by the Go
-controller. The initial worker does not call SEC/BLS/KIS yet. It verifies that a
-queued `pipeline_job_item` can be claimed, marked `RUNNING`, and completed with
-a terminal status.
+## Pipeline Worker 기본 동작 확인
 
-Create a manual job through the controller first, then preview the next item:
+`workers/dry_run_worker.py`는 Go Controller가 생성한 Job을 실제 외부 API 호출 없이 점검한다. 대기 중인 `pipeline_job_item`을 선점하고 `RUNNING`으로 변경한 뒤 종료 상태로 완료할 수 있는지 확인한다.
+
+먼저 Controller에서 수동 Job을 생성하고 다음 Item을 미리 확인한다.
 
 ```powershell
 python -m workers.dry_run_worker --source BLS
 ```
 
-Apply the status transition:
+상태 전이를 실제 DB에 반영한다.
 
 ```powershell
 python -m workers.dry_run_worker --source BLS --apply
 ```
 
-Mark the item as skipped or failed for admin-page testing:
+관리자 페이지를 점검하기 위해 Item을 `SKIPPED` 또는 `FAILED`로 완료할 수도 있다.
 
 ```powershell
 python -m workers.dry_run_worker --source BLS --complete-status SKIPPED --apply
 python -m workers.dry_run_worker --source BLS --complete-status FAILED --apply
 ```
 
-The worker reads `DATABASE_URL` from `trader-data/.env`. The claim operation uses
-`FOR UPDATE SKIP LOCKED`, so multiple worker processes can run without claiming
-the same item.
+Worker는 `trader-data/.env`에서 `DATABASE_URL`을 읽는다. Item 선점에는 `FOR UPDATE SKIP LOCKED`를 사용하므로 여러 Worker 프로세스가 같은 Item을 동시에 가져가지 않는다.
 
-## BLS macro worker
+## BLS 거시경제 Worker
 
-After creating a BLS job from `/admin/data`, process one queued BLS item with:
+`/admin/data`에서 BLS Job을 생성한 뒤 대기 중인 BLS Item 하나를 처리한다.
 
 ```powershell
 python -m workers.bls_macro_worker
 ```
 
-Run it as a long-lived worker process:
+장기 실행 Worker로 동작시키려면 다음과 같이 실행한다.
 
 ```powershell
 python -m workers.bls_macro_worker --loop --poll-interval-seconds 10
 ```
 
-The worker claims one `BLS:{seriesId}` item, reads `startYear` and `endYear` from
-the parent job parameters, collects that BLS timeseries, writes raw/report files
-under `pipeline_output/bls_macro_worker`, upserts `macro_*` tables, records
-lineage, and completes the item as `SUCCESS` or `SKIPPED`. In `--loop` mode it
-waits and polls again when there is no queued item. Series metadata is read from
-`macro_series`, so adding a new BLS series to the table also makes it available
-to the admin picker, schedule form, and worker.
+Worker는 `BLS:{seriesId}` Item 하나를 선점하고 상위 Job parameter에서 `startYear`, `endYear`를 읽는다. 이후 BLS 시계열 데이터를 수집하고 `pipeline_output/bls_macro_worker` 아래에 원본과 보고서 파일을 저장한 다음, `macro_*` 테이블을 UPSERT하고 lineage를 기록한다. Item은 결과에 따라 `SUCCESS` 또는 `SKIPPED`로 완료한다.
+
+`--loop` 모드에서는 대기 Item이 없을 때 기다린 뒤 다시 조회한다. Series 메타데이터는 `macro_series`에서 읽으므로 테이블에 새 BLS Series를 추가하면 관리자 선택 화면, Schedule Form, Worker에서도 사용할 수 있다.
