@@ -1,4 +1,4 @@
-# SEC Financial Backfill
+# SEC 재무 데이터 백필
 
 SEC `submissions`와 `companyfacts`를 이용해 `filing`, `financial_metric`,
 `financial_fact`, `source_object`, `record_lineage`를 백필한다.
@@ -52,7 +52,7 @@ python -m backfills.sec_financial.backfill `
   --apply
 ```
 
-커서를 사람이 옮기지 않고 자동으로 끝까지 이어가려면 auto batch 모드를 사용한다.
+커서를 사람이 옮기지 않고 자동으로 끝까지 이어가려면 자동 배치 모드를 사용한다.
 네트워크가 불안정할 수 있으므로 처음에는 50~100개 단위로 확인하고, 안정적이면 200개로 올린다.
 
 ```powershell
@@ -90,11 +90,11 @@ python -m backfills.sec_financial.backfill `
 
 ## 3. 옵션 기준
 
-- 기본은 core financial metrics only다.
-- `--all-facts`는 표준 지표로 매핑되지 않은 SEC fact까지 저장한다.
-- `--include-history`는 SEC recent filing 외 과거 submissions page까지 조회한다.
-- 기업 하나 단위로 transaction을 나누어 한 기업 실패가 전체 백필을 중단시키지 않는다.
-- 저장하지 못한 fact, 실패 기업, companyfacts 미제공/핵심 지표 없음 기업은
+- 기본 설정에서는 핵심 재무 지표만 저장한다.
+- `--all-facts`는 표준 지표로 매핑되지 않은 SEC Fact까지 저장한다.
+- `--include-history`는 SEC의 최근 Filing 외에 과거 Submissions 페이지까지 조회한다.
+- 기업 하나 단위로 트랜잭션을 나누어 한 기업의 실패가 전체 백필을 중단시키지 않게 한다.
+- 저장하지 못한 Fact, 실패 기업, Company Facts 미제공 기업, 핵심 지표가 없는 기업은
   `pipeline_output/sec_financial_backfill/reports`에 남긴다.
 - `processed_companies_*.jsonl`은 성공, 스킵, 실패를 포함한 시도 목록이다. 마지막 줄의
   `cik` 또는 `summary_*.json`의 `next_start_after_cik`를 다음 배치 커서로 사용한다.

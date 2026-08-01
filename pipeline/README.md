@@ -1,8 +1,10 @@
-# trader-data pipeline boundary
+# Trader 데이터 파이프라인 실행 경계
 
-이 폴더는 BLS, SEC, KIS worker가 공통으로 사용하는 pipeline stage 이름과 향후 수집/ETL 분리 기준을 둔다.
+이 폴더는 BLS, SEC, KIS Worker가 공통으로 사용하는 파이프라인 단계 이름과 수집/ETL 실행 경계를 정의한다.
 
-현재 worker MVP는 보수적으로 동작한다.
+현재 Worker는 Combined와 Split 두 가지 실행 방식을 제공한다.
+
+Combined Worker는 한 프로세스에서 다음 단계를 연속으로 처리한다.
 
 ```text
 pipeline_job_item
@@ -13,11 +15,11 @@ pipeline_job_item
   -> item terminal status 기록
 ```
 
-이 모드는 `COMBINED_COLLECT_TRANSFORM_LOAD`다. 한 프로세스가 수집, raw 저장, 변환, DB 적재까지 처리한다.
+이 모드는 `COMBINED_COLLECT_TRANSFORM_LOAD`다. 간단한 기능 검증과 수동 운영에 사용할 수 있다.
 
-## 다음 분리 구조
+## 수집과 ETL 분리 구조
 
-다음 단계에서는 코드 구조는 최대한 유지하되 실행 책임을 나눈다.
+Split Worker는 코드 구조를 공유하면서 수집과 ETL의 실행 책임을 나눈다.
 
 ```text
 Collector worker
@@ -44,33 +46,33 @@ Kafka는 원본 데이터 저장소가 아니다. Kafka에는 큰 SEC companyfac
 }
 ```
 
-원본 payload는 S3 또는 로컬 저장소에 먼저 보관하고, ETL worker는 해당 위치를 읽어서 DB 작업을 수행한다.
+원본 payload는 S3 또는 로컬 저장소에 먼저 보관하고, ETL Worker는 해당 위치를 읽어 DB 작업을 수행한다.
 
-## 왜 지금 바로 완전 분리하지 않았나
+## 왜 두 실행 방식을 함께 유지하는가
 
-처음부터 collector와 ETL worker를 완전히 나누면 구조는 더 멋있어 보이지만, 현재 단계에서는 오히려 디버깅 비용이 커진다.
+Combined 방식은 Provider별 수집과 변환을 한 프로세스에서 빠르게 점검하는 기준으로 사용한다. Split 방식은 원본 보존, Kafka 이벤트, ETL 재처리, lag 기반 실행 제어가 필요한 운영형 흐름을 검증하는 데 사용한다.
 
-- 스키마와 관리자 페이지가 아직 변하고 있다.
-- source별 수집량, DB 적재 시간, 실패 유형을 더 측정해야 한다.
-- Kafka outbox, consumer 중복 처리, processed_event 흐름을 먼저 안정화해야 한다.
-- 수집/ETL을 분리하면 raw storage, Kafka, ETL consumer, DB loader까지 장애 지점이 늘어난다.
+- 작은 범위의 문제는 Combined 방식에서 외부 API부터 DB 적재까지 빠르게 추적할 수 있다.
+- Split 방식에서는 수집에 성공한 원본을 다시 호출하지 않고 ETL만 재실행할 수 있다.
+- Source별 수집량과 DB 적재 시간을 관찰해 Kafka lag 임계값과 batch 크기를 조정할 수 있다.
+- Kafka를 사용할 수 없는 로컬 환경에서는 Combined Worker나 특정 `source_object_id` 직접 실행 경로를 사용할 수 있다.
 
-그래서 현재는 combined worker를 유지하되, checkpoint에 공통 stage를 남긴다.
+두 방식은 공통 단계와 checkpoint를 사용한다.
 
 ```text
 RESOLVE_TARGET -> COLLECT_RAW -> WRITE_RAW_PREVIEW -> TRANSFORM -> LOAD_DB
 ```
 
-이 경계가 있으면 나중에 같은 코드를 `COLLECT_ONLY`, `ETL_ONLY` 모드로 나누기 쉽다.
+같은 단계 이름을 사용하므로 Combined와 `COLLECT_ONLY`, `ETL_ONLY` 실행 결과를 동일한 기준으로 추적할 수 있다.
 
 ## 폴더별 책임
 
-| Folder | Responsibility |
+| 폴더 | 책임 |
 |---|---|
-| `collectors/` | 외부 API client와 raw provider payload 수집 |
-| `transformers/` | provider payload를 canonical record로 변환 |
+| `collectors/` | 외부 API Client 호출과 Provider 원본 payload 수집 |
+| `transformers/` | Provider payload를 정규화 레코드로 변환 |
 | `backfills/` | 과거 데이터 이관, 일회성 대량 작업 |
-| `workers/` | job item claim, stage orchestration, job 상태 갱신 |
-| `pipeline/` | 공통 stage 이름, runtime metadata, 향후 event helper |
+| `workers/` | Job Item 선점, 단계 실행 조정, Job 상태 갱신 |
+| `pipeline/` | 공통 단계 이름과 실행 metadata |
 
-Go controller는 나중에 ETL 실행 시점을 결정한다. 예를 들어 사용자 트래픽이 낮은 시간대, 장 마감 이후, Kafka lag가 기준치를 넘은 시점에 ETL worker를 실행하도록 만들 수 있다.
+Go Controller는 Kafka lag, Worker 상태 신호, 처리 가능 시간대 정책을 기준으로 Python Worker 실행 여부와 AWS ASG 용량을 판단한다.

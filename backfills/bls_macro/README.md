@@ -1,4 +1,4 @@
-# BLS Macro Backfill
+# BLS 거시경제 데이터 백필
 
 BLS 발표 캘린더와 Timeseries API 응답을 수집해 다음 테이블에 반영한다.
 
@@ -10,7 +10,7 @@ BLS 발표 캘린더와 Timeseries API 응답을 수집해 다음 테이블에 �
 - `macro_observation_vintage`
 - `record_lineage`
 
-## 1. Dry Run
+## 1. 사전 실행
 
 DB에 쓰지 않고 raw 원본과 테이블별 JSONL만 생성한다.
 
@@ -55,17 +55,15 @@ BLS_USER_AGENT="TraderDataBot-KR/1.0"
 
 현재 기본 수집 시리즈:
 
-- `CUSR0000SA0`: CPI
-- `CUSR0000SA0L1E`: Core CPI
-- `WPUFD4`: PPI Final Demand
-- `LNS14000000`: Unemployment Rate
-- `CES0000000001`: Total Nonfarm Payroll
-- `CES0500000003`: Average Hourly Earnings
+- `CUSR0000SA0`: 소비자물가지수(CPI)
+- `CUSR0000SA0L1E`: 근원 소비자물가지수(Core CPI)
+- `WPUFD4`: 최종수요 생산자물가지수(PPI)
+- `LNS14000000`: 실업률
+- `CES0000000001`: 비농업 부문 전체 고용
+- `CES0500000003`: 시간당 평균 임금
 
-## 5. Unavailable observations
+## 5. 수집 불가 관측값
 
-BLS can return a monthly period with a non-numeric value such as `-` and a
-footnote explaining why the data is unavailable. Those rows are not inserted
-into numeric `macro_observation`; they are preserved in
-`macro_observation_status` so the admin inventory can distinguish "not
-collected yet" from "the provider explicitly marked this period unavailable."
+BLS는 특정 월의 값이 제공되지 않았을 때 `-` 같은 비숫자 값과 사유가 담긴 각주를 반환할 수 있다.
+이 행은 숫자 컬럼을 사용하는 `macro_observation`에 넣지 않고 `macro_observation_status`에 보존한다.
+관리자 화면에서는 이를 통해 아직 수집하지 않은 기간과 Provider가 명시적으로 수집 불가 상태를 반환한 기간을 구분할 수 있다.
