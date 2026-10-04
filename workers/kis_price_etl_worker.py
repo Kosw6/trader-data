@@ -6,24 +6,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from backfills.price_bar_invalid_repair import (
+    DEFAULT_INTERVAL,
+    DEFAULT_SOURCE,
+)
+from collectors.kis_client import normalize_daily_price
 from dotenv import load_dotenv
 from psycopg2.extras import Json
 
-from collectors.kis_client import normalize_daily_price
 from workers.db import connect_database
 from workers.event_repository import find_processed_event, record_processed_event
 from workers.heartbeat import WorkerHeartbeatReporter
-from workers.raw_repository import source_object_completed_with_lineage
 from workers.kis_price_worker import (
     build_price_rows,
     upsert_price_bar_lineage,
 )
-from backfills.price_bar_invalid_repair import (
-    DEFAULT_INTERVAL,
-    DEFAULT_SOURCE,
-    upsert_price_bars,
-)
-
+from workers.price_persistence import persist_price_rows, require_adjusted
+from workers.raw_repository import source_object_completed_with_lineage
 
 LOGGER = logging.getLogger("kis-price-etl-worker")
 
@@ -239,7 +238,7 @@ def etl_options(source_object, payload, args):
         "source": str(parameters.get("source") or args.source).strip().upper(),
         "interval": str(parameters.get("interval") or args.interval).strip().upper(),
         "currency": str(parameters.get("currency") or args.currency).strip().upper(),
-        "adjusted": bool(payload.get("adjusted")),
+        "adjusted": require_adjusted(payload.get("adjusted")),
     }
 
 
@@ -249,7 +248,7 @@ def write_etl_previews(args, source_object_id, source_object, rows, statuses):
     output_root.mkdir(parents=True, exist_ok=True)
     records = {
         "source_object": [source_object],
-        "price_bar": [
+        ("price_adjustment_candidate" if rows and rows[0]["provider_adjusted"] else "price_bar"): [
             {
                 **row,
                 "trade_date": row["trade_date"].isoformat(),
@@ -312,12 +311,13 @@ def process_source_object(connection, source_object_id, args):
 
         upserted_bars = []
         if rows:
-            upserted_bars = upsert_price_bars(
+            upserted_bars = persist_price_rows(
                 connection,
                 rows,
                 options["source"],
                 options["interval"],
                 options["currency"],
+                source_object_id=source_object_id,
                 return_records=True,
             )
             with connection.cursor() as cursor:

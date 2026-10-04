@@ -424,6 +424,8 @@ def upsert_price_bars(connection, rows, source, interval, currency, return_recor
     """검증된 복구 값을 price_bar 업무키로 멱등 UPSERT하고 반영 건수를 반환한다."""
     if not rows:
         return [] if return_records else 0
+    if any(row.get("provider_adjusted", False) is not False for row in rows):
+        raise ValueError("수정주가는 일반 가격 테이블에 저장할 수 없습니다.")
     values = [
         (
             row["asset_id"],
@@ -458,7 +460,6 @@ def upsert_price_bars(connection, rows, source, interval, currency, return_recor
             high = EXCLUDED.high,
             low = EXCLUDED.low,
             close = EXCLUDED.close,
-            adjusted_close = EXCLUDED.adjusted_close,
             volume = EXCLUDED.volume,
             currency = EXCLUDED.currency,
             collected_at = EXCLUDED.collected_at,
@@ -559,6 +560,8 @@ def write_repair_report(statuses, report_dir):
 
 def run_repair(connection, client, ranges, args, report_dir, raw_dir):
     """선택한 범위를 순차 조회하고 범위별 트랜잭션으로 복구 결과를 반영한다."""
+    if args.apply and args.adjusted:
+        raise ValueError("수정주가 적재는 원문 계보를 보존하는 KIS worker를 사용하세요.")
     stats = Counter()
     all_statuses = []
     collected_at = datetime.now(timezone.utc)

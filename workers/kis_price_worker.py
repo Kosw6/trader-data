@@ -10,7 +10,6 @@ from backfills.price_bar_invalid_repair import (
     DEFAULT_INTERVAL,
     DEFAULT_SOURCE,
     invalid_reasons,
-    upsert_price_bars,
 )
 from collectors.common import (
     LocalPipelineStorage,
@@ -19,9 +18,10 @@ from collectors.common import (
 )
 from collectors.kis_client import KISClient
 from pipeline.stages import PipelineMode, PipelineStage
+
 from workers.db import connect_database
 from workers.job_repository import claim_next_queued_item, complete_item, fail_item
-
+from workers.price_persistence import persist_price_rows, require_adjusted
 
 LOGGER = logging.getLogger("kis-price-worker")
 
@@ -233,6 +233,10 @@ def apply_incremental_window(connection, asset, options):
     기존 BACKFILL 모드는 그대로 둔다. 이렇게 해야 관리자 페이지에서
     '전체 백필'과 '최신분만 수집'을 선택적으로 실행할 수 있다.
     """
+    # 조정 가격은 기업행위로 과거 값도 달라질 수 있다. 일반 가격의 최신일로
+    # 요청 범위를 잘라 버리면 신규 후보 수집이 생략되므로 명시한 범위를 유지한다.
+    if require_adjusted(options.get("adjusted")):
+        return options
     if options["collection_mode"] not in {"INCREMENTAL", "DAILY_INCREMENTAL", "LATEST_ONLY"}:
         return options
 
@@ -286,6 +290,7 @@ def write_raw_pages(storage, asset, options, result, collected_at):
 
 def build_price_rows(asset, bars, options, collected_at):
     """KIS 일봉을 price_bar UPSERT용 row와 검증 상태로 변환한다."""
+    adjusted = require_adjusted(options.get("adjusted"))
     rows = []
     statuses = []
     for bar in bars:
@@ -305,6 +310,8 @@ def build_price_rows(asset, bars, options, collected_at):
             continue
 
         stable_payload = {
+            "provider_adjusted": adjusted,
+            "date_encoding": "PROVIDER_TRADE_DATE",
             "asset_id": asset["asset_id"],
             "source": options["source"],
             "interval": options["interval"],
@@ -317,6 +324,7 @@ def build_price_rows(asset, bars, options, collected_at):
             "currency": options["currency"],
         }
         rows.append({
+            "provider_adjusted": adjusted,
             "asset_id": asset["asset_id"],
             "trade_date": bar["date"],
             "open": bar["open"],
@@ -350,7 +358,8 @@ def write_table_previews(storage, source_object, rows, statuses):
         for row in rows
     ]
     storage.write_table("source_object", [source_object])
-    storage.write_table("price_bar", preview_rows)
+    target = "price_adjustment_candidate" if rows and rows[0]["provider_adjusted"] else "price_bar"
+    storage.write_table(target, preview_rows)
     storage.write_table("price_bar_fetch_status", statuses)
 
 
@@ -393,7 +402,7 @@ def upsert_source_object(cursor, source):
 def price_bar_target_key(bar_record):
     """price_bar의 DB PK가 달라져도 같은 봉을 식별할 수 있는 안정 키를 만든다."""
     return build_target_record_key(
-        "price_bar",
+        bar_record.get("target_table", "price_bar"),
         {
             "asset_id": bar_record["asset_id"],
             "source": bar_record["source"],
@@ -413,11 +422,11 @@ def upsert_price_bar_lineage(cursor, source_object_id, upserted_bars, processed_
     rows = [
         (
             source_object_id,
-            "price_bar",
+            bar.get("target_table", "price_bar"),
             bar["id"],
             price_bar_target_key(bar),
             "kis_price_worker",
-            "v1",
+            "v2",
             bar.get("content_hash"),
             processed_at,
         )
@@ -543,12 +552,13 @@ def process_item(connection, item, cli_args):
     stats["source_object_id"] = source_object_id
 
     if rows:
-        upserted_bars = upsert_price_bars(
+        upserted_bars = persist_price_rows(
             connection,
             rows,
             options["source"],
             options["interval"],
             options["currency"],
+            source_object_id=source_object_id,
             return_records=True,
         )
         with connection.cursor() as cursor:

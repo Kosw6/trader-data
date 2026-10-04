@@ -112,6 +112,8 @@ class KISClient:
         continuation="",
     ):
         """조회 기준일 이전의 해외주식 일봉 한 페이지와 원본 응답을 반환한다."""
+        if type(adjusted) is not bool:
+            raise ValueError("수정주가 여부는 boolean이어야 합니다.")
         token = self.get_access_token()
         headers = {
             "Content-Type": "application/json; charset=utf-8",
@@ -260,4 +262,3 @@ def normalize_daily_price(item):
         "volume": parse_decimal(item.get("tvol"), "volume"),
         "raw": item,
     }
-

@@ -221,7 +221,6 @@ def migrate_window(
                 high = EXCLUDED.high,
                 low = EXCLUDED.low,
                 close = EXCLUDED.close,
-                adjusted_close = EXCLUDED.adjusted_close,
                 volume = EXCLUDED.volume,
                 currency = EXCLUDED.currency,
                 collected_at = EXCLUDED.collected_at,
