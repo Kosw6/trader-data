@@ -1,3 +1,5 @@
+"""보관 전용: 폐기한 stock 테이블의 과거 이관 코드. 현행 실행 경로에서 사용하지 않는다."""
+
 import argparse
 import logging
 import os

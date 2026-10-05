@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from backfills.asset_company_match_backfill import build_match_candidates
-from backfills.price_bar_backfill import iter_time_windows, parse_timestamp
+from archive.legacy_stock.price_bar_backfill import iter_time_windows, parse_timestamp
 from backfills.price_bar_invalid_repair import (
     InvalidBar,
     build_repair_rows,

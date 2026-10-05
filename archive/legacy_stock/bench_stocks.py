@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MongoDB vs PostgreSQL (Timescale) 벤치마크 스크립트 (강화판)
+보관 전용: 폐기한 stock 스키마용 MongoDB vs PostgreSQL 벤치마크. 현행 실행 금지.
 - 동일/유사 인덱스 전제:
   Mongo: {symb:1, timestamp:1}, (옵션) {timestamp:1}
   Postgres: (symb, "timestamp"), (symb, "timestamp" DESC), (옵션) "timestamp" DESC (+ 커버링 INCLUDE 권장)

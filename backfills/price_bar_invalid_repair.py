@@ -26,7 +26,7 @@ DEFAULT_INTERVAL = "1D"
 
 @dataclass(frozen=True)
 class InvalidBar:
-    """레거시 stock에서 검증에 실패한 일봉 한 건의 복구 식별 정보를 보관한다."""
+    """price_bar에서 검증에 실패한 일봉 한 건의 복구 식별 정보를 보관한다."""
 
     asset_id: int
     exchange_code: str
@@ -55,7 +55,7 @@ class RepairRange:
 def parse_args():
     """보고서 생성, API 조회, 실제 반영 범위를 제어하는 CLI 옵션을 읽는다."""
     parser = argparse.ArgumentParser(
-        description="Re-fetch and repair legacy stock rows with invalid OHLC values."
+        description="Re-fetch and repair price_bar rows with invalid OHLC values."
     )
     parser.add_argument(
         "--fetch",
@@ -161,19 +161,19 @@ def resolve_report_dir(base_dir, symbols=None, start=None, end=None):
     return Path(base_dir) / f"{symbol_part}_{start_part}_{end_part}"
 
 
-def fetch_invalid_bars(connection, provider, symbols=None, start=None, end=None):
-    """레거시 stock에서 Asset 매핑은 됐지만 OHLCV 검증에 실패한 행을 조회한다."""
+def fetch_invalid_bars(connection, provider, symbols=None, start=None, end=None, interval="1D"):
+    """현재 가격 원본을 검사한다. 다른 제공자/주기의 봉은 복구 대상으로 섞지 않는다."""
     predicates = []
-    params = [provider]
+    params = [provider, interval]
     normalized_symbols = normalize_symbols(symbols)
     if normalized_symbols:
-        predicates.append("s.symb = ANY(%s)")
+        predicates.append("aps.provider_symbol = ANY(%s)")
         params.append(normalized_symbols)
     if start:
-        predicates.append("s.timestamp >= %s")
+        predicates.append("s.bar_time >= %s")
         params.append(datetime.combine(start, time.min, tzinfo=timezone.utc))
     if end:
-        predicates.append("s.timestamp < %s")
+        predicates.append("s.bar_time < %s")
         params.append(
             datetime.combine(end + timedelta(days=1), time.min, tzinfo=timezone.utc)
         )
@@ -184,18 +184,18 @@ def fetch_invalid_bars(connection, provider, symbols=None, start=None, end=None)
             aps.asset_id,
             aps.provider_exchange_code,
             aps.provider_symbol,
-            (s.timestamp AT TIME ZONE 'UTC')::date AS trade_date,
+            (s.bar_time AT TIME ZONE 'UTC')::date AS trade_date,
             s.open,
             s.high,
             s.low,
             s.close,
             s.volume
-        FROM stock s
+        FROM price_bar s
         JOIN asset_provider_symbol aps
-          ON aps.provider = %s
-         AND aps.provider_symbol = s.symb
+          ON aps.provider = s.source
+         AND aps.asset_id = s.asset_id
          AND aps.is_current = TRUE
-        WHERE NOT (
+        WHERE s.source = %s AND s."interval" = %s AND NOT (
             s.open IS NOT NULL
             AND s.high IS NOT NULL
             AND s.low IS NOT NULL
@@ -662,6 +662,7 @@ def main():
             symbols=args.symbol,
             start=start,
             end=end,
+            interval=args.interval,
         )
         details_path, summary_path = write_invalid_reports(invalid, report_dir)
         ranges = group_repair_ranges(
