@@ -2,6 +2,8 @@ import argparse
 import json
 import logging
 import os
+import signal
+import threading
 
 from dotenv import load_dotenv
 
@@ -60,6 +62,8 @@ def create_consumer(args):
         group_id=args.group_id,
         enable_auto_commit=False,
         auto_offset_reset="earliest",
+        max_poll_records=1,
+        max_poll_interval_ms=900000,
         value_deserializer=lambda value: json.loads(value.decode("utf-8")),
     )
 
@@ -81,6 +85,7 @@ def process_message(connection, message, consumer_name):
 
     already_processed = find_processed_event(connection, consumer_name, idempotency_key)
     if already_processed:
+        connection.rollback()  # End the duplicate-detection read transaction.
         LOGGER.info(
             "duplicate kafka event skipped idempotency_key=%s previous_status=%s",
             idempotency_key,
@@ -111,9 +116,19 @@ def process_message(connection, message, consumer_name):
             event_status,
             error_message=error_message,
         )
-        return event_status.lower()
     except Exception as exc:
+        import psycopg2
+        from collectors.s3_raw import RawStorageError
+        if isinstance(exc, (RawStorageError, psycopg2.Error)):
+            # Uncertain storage/SQL state requires review, never an offset commit
+            # or a blind FAILED write over a possibly committed result.
+            raise
+        if item.source.upper() == "NEWS":
+            # Expected provider/schema failures are finalized by news_collector. Unknown
+            # failures or a disabled deployment must not acknowledge/overwrite its checkpoint.
+            raise
         LOGGER.exception("kafka item processing failed item_id=%s", item.item_id)
+        connection.rollback()
         try:
             fail_claimed_item(connection, item, exc)
         finally:
@@ -128,6 +143,13 @@ def process_message(connection, message, consumer_name):
                 error_message=str(exc),
             )
         return "failed"
+
+    # Keep cleanup outside the collection error handler: a cleanup failure must
+    # never overwrite a confirmed SUCCESS with FAILED.
+    if event_status == "SUCCESS" and os.getenv("RAW_STORAGE_BACKEND", "LOCAL").upper() == "S3":
+        from collectors.common import cleanup_verified_s3_previews
+        cleanup_verified_s3_previews(item.item_id, item.job_id)
+    return event_status.lower()
 
 
 def handle_unclaimable_item(connection, consumer_name, idempotency_key, message, item_id):
@@ -176,6 +198,29 @@ def read_required(payload, key):
     return value
 
 
+def consume(consumer, connection, heartbeat, args, stop):
+    """One record at a time; commit only the record actually processed.
+
+    SIGTERM stops admission, lets the current synchronous item finish and then
+    returns. A hard kill still leaves its offset uncommitted for recovery.
+    """
+    from kafka import TopicPartition, OffsetAndMetadata
+    processed = 0
+    while not stop.is_set():
+        batches = consumer.poll(timeout_ms=1000, max_records=1)
+        for messages in batches.values():
+            for message in messages:
+                if stop.is_set():
+                    return
+                heartbeat.mark_busy(running_job_items=1)
+                result = process_message(connection, message, args.consumer_name)
+                consumer.commit({TopicPartition(message.topic, message.partition): OffsetAndMetadata(message.offset + 1, None)})
+                processed += 1
+                heartbeat.mark_idle(metadata={"lastResult": result, "lastCommittedOffset": message.offset})
+                if args.max_records and processed >= args.max_records:
+                    return
+
+
 def main():
     """Kafka 메시지를 계속 소비하면서 trader-data worker 처리로 넘긴다."""
     load_dotenv()
@@ -197,38 +242,14 @@ def main():
         },
     )
     heartbeat.start()
-    processed_count = 0
+    stop = threading.Event()
+    old_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            old_handlers[signum] = signal.signal(signum, lambda *unused: stop.set())
     failed = False
     try:
-        for message in consumer:
-            heartbeat.mark_busy(
-                running_job_items=1,
-                metadata={
-                    "lastTopic": message.topic,
-                    "lastPartition": message.partition,
-                    "lastOffset": message.offset,
-                },
-            )
-            result = process_message(connection, message, args.consumer_name)
-            consumer.commit()
-            processed_count += 1
-            heartbeat.mark_idle(
-                metadata={
-                    "lastResult": result,
-                    "lastCommittedTopic": message.topic,
-                    "lastCommittedPartition": message.partition,
-                    "lastCommittedOffset": message.offset,
-                },
-            )
-            LOGGER.info(
-                "kafka message committed topic=%s partition=%s offset=%s result=%s",
-                message.topic,
-                message.partition,
-                message.offset,
-                result,
-            )
-            if args.max_records and processed_count >= args.max_records:
-                break
+        consume(consumer, connection, heartbeat, args, stop)
     except Exception as exc:
         failed = True
         heartbeat.mark_error(metadata={"lastError": str(exc)})
@@ -237,6 +258,8 @@ def main():
         heartbeat.stop(status="ERROR" if failed else "STOPPED")
         connection.close()
         consumer.close()
+        for signum, old in old_handlers.items():
+            signal.signal(signum, old)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,30 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+_S3_PREVIEW_ROOTS = {}
+
+
+def cleanup_verified_s3_previews(item_id, job_id):
+    """Drop derived previews after a confirmed DB result; never delete raw files."""
+    base = Path(os.getenv("RAW_STORAGE_LOCAL_ROOT", "pipeline_output")).resolve()
+    for root in _S3_PREVIEW_ROOTS.pop(item_id, set()):
+        root = Path(root)
+        if (root.is_symlink() or not root.resolve().is_relative_to(base)
+                or root.name != f"item-{item_id}" or root.parent.name != f"job-{job_id}"):
+            raise RuntimeError("unsafe_preview_cleanup_scope")
+        tables = root / "tables"
+        if tables.is_symlink(): raise RuntimeError("unsafe_preview_cleanup_scope")
+        if tables.is_dir():
+            for path in tables.glob("*.jsonl"):
+                if path.is_file() and not path.is_symlink(): path.unlink()
+        # Empty directories only: uncertain/failed raw bytes remain available.
+        for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_dir() and not path.is_symlink():
+                try: path.rmdir()
+                except OSError: pass
+        try: root.rmdir()
+        except OSError: pass
+
 
 def utc_now():
     """수집 시각 기록에 사용할 timezone-aware UTC 현재 시각을 반환한다."""
@@ -183,8 +207,13 @@ class LocalPipelineStorage:
             payload,
             ensure_ascii=False,
             indent=2,
+            sort_keys=self.storage_backend == "S3",
             default=json_default,
         ).encode("utf-8")
+        if self.storage_backend == "S3":
+            from collectors.s3_raw import max_bytes, RawStorageError
+            if len(encoded) > max_bytes():
+                raise RawStorageError("raw_object_size_limit")
         path.write_bytes(encoded)
         return self._source_object(
             provider,
@@ -206,6 +235,10 @@ class LocalPipelineStorage:
         collected_at,
     ):
         """ICS 등 JSON이 아닌 원본 바이트를 저장하고 source_object를 반환한다."""
+        if self.storage_backend == "S3":
+            from collectors.s3_raw import max_bytes, RawStorageError
+            if len(payload) > max_bytes():
+                raise RawStorageError("raw_object_size_limit")
         digest = content_hash(payload)
         path = (
             self.raw_root
@@ -241,17 +274,19 @@ class LocalPipelineStorage:
         """저장한 원본의 URI·크기·해시를 source_object 스키마로 구성한다."""
         external_id = str(external_id) if external_id is not None else None
         storage_key = normalize_storage_key(path)
+        object_uri = join_storage_uri(self.storage_base_uri, storage_key, path)
+        if self.storage_backend == "S3":
+            from collectors.s3_raw import publish
+            storage_key, object_uri = publish(path, self.storage_base_uri, provider, data_type, digest, object_size)
+            if self.pipeline_job_item_id is not None:
+                _S3_PREVIEW_ROOTS.setdefault(self.pipeline_job_item_id, set()).add(self.root.resolve())
         return {
             "provider": provider,
             "data_type": data_type,
             "external_id": external_id,
             "storage_backend": self.storage_backend,
             "storage_key": storage_key,
-            "object_uri": join_storage_uri(
-                self.storage_base_uri,
-                storage_key,
-                path,
-            ),
+            "object_uri": object_uri,
             "object_size": object_size,
             "content_hash": digest,
             "dedupe_key": build_dedupe_key(

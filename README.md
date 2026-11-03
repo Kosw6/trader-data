@@ -233,3 +233,16 @@ python -m workers.bls_macro_worker --loop --poll-interval-seconds 10
 Worker는 `BLS:{seriesId}` Item 하나를 선점하고 상위 Job parameter에서 `startYear`, `endYear`를 읽는다. 이후 BLS 시계열 데이터를 수집하고 `pipeline_output/bls_macro_worker` 아래에 원본과 보고서 파일을 저장한 다음, `macro_*` 테이블을 UPSERT하고 lineage를 기록한다. Item은 결과에 따라 `SUCCESS` 또는 `SKIPPED`로 완료한다.
 
 `--loop` 모드에서는 대기 Item이 없을 때 기다린 뒤 다시 조회한다. Series 메타데이터는 `macro_series`에서 읽으므로 테이블에 새 BLS Series를 추가하면 관리자 선택 화면, Schedule Form, Worker에서도 사용할 수 있다.
+
+
+## 재무 잔여 검토: 2026-10-31 699~705
+
+[원문 근거·자동화 계약·실제 대화 및 운영 영수증](../trader-ai/docs/implementation_699_701_residual_20261031.md)에 기록한다. 699의17범위, 702의10범위(700/701 초안 포함), 704의2범위를 구분하며 중복 계산하지 않는다. 현재 원문 근거 검증 코드는 기존 Go `reviewedReconciliation` → Python 경로에서 회사·기간별 등록 근거만 재생한다. 새 스케줄은 만들지 않았다. 미등록 정정·통화·원문 누락은 자동 승인하지 않는다.
+
+잔여 진단은 DB/네트워크 없는 별도 도구다. 감사가 완료된 resolved index와 동결 장부를 사용하고 새 출력 경로를 지정한다.
+
+```powershell
+python -m workers.residual_diagnostics705 --ledger ../output/reconciliation685/residual-scopes.jsonl.gz --resolved-index ../output/reconciliation704/resolved-scope-index.json --as-of 2026-10-31 --output ../output/reconciliation705/remaining-diagnostics.json
+```
+
+705 진단은 원문 수집이나 승인 작업을 실행하지 않는다. 기존 출력이 있으면 새 경로를 지정한다. 최종 운영 상태와 잔여 수는704의 전체 독립 감사·완료 영수증을 우선한다.

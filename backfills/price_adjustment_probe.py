@@ -1,6 +1,7 @@
 """NVDA 분할 전후 제한된 비교 수집. DB 쓰기·검색 승인·주문 기능은 없다."""
 
 import json
+import argparse
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -32,6 +33,12 @@ def compare(raw_bars, adjusted_bars):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--start", type=date.fromisoformat, default=date(2024,6,3))
+    parser.add_argument("--end", type=date.fromisoformat, default=date(2024,6,14))
+    args = parser.parse_args()
+    if args.end < args.start or (args.end-args.start).days > 31:
+        parser.error("비교 수집은 최대 32일 범위만 허용합니다.")
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env", override=False)
     run = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -41,8 +48,8 @@ def main():
     client = KISClient.from_env(timeout=15, min_request_interval=1, max_retries=0)
     report = {
         "symbol": "NVDA",
-        "start": "2024-06-03",
-        "end": "2024-06-14",
+        "start": args.start.isoformat(),
+        "end": args.end.isoformat(),
         "approval": "NOT_APPROVED",
         "results": [],
         "errors": [],
@@ -54,8 +61,8 @@ def main():
                 result = client.get_daily_prices(
                     "NAS",
                     "NVDA",
-                    date(2024, 6, 3),
-                    date(2024, 6, 14),
+                    args.start,
+                    args.end,
                     adjusted=adjusted,
                     max_pages=1,
                 )

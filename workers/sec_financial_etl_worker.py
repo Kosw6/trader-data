@@ -168,6 +168,7 @@ def records_from_sec_sources(source_objects, args):
         "filing": filing_records,
         "financial_fact": financial_fact_records,
         "company_facts_missing": len(source_by_type.get("COMPANY_FACTS", [])) == 0,
+        "raw_payloads674": [(source, payload_by_id[source["id"]]) for source in source_by_type.get("COMPANY_FACTS", [])],
     }
 
 

@@ -10,6 +10,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from pipeline.request_policy import RequestPolicyError
+
 from workers.db import connect_database
 from workers.job_repository import claim_next_queued_item, complete_item, fail_item
 from workers.kis_price_worker import (
@@ -40,7 +42,12 @@ def parse_args():
     parser.add_argument("--currency", default="USD")
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--request-interval", type=float, default=0.2)
+    parser.add_argument("--request-policy", choices=("legacy", "bounded-v1", "coordinated-v1"), default="legacy",
+                        help="Opt-in bounded HTTP policy; existing jobs keep legacy behavior.")
     parser.add_argument("--adjusted", action="store_true")
+    parser.add_argument("--recovery-manifest")
+    parser.add_argument("--recovery-manifest-sha256")
+    parser.add_argument("--recovery-item-id", type=int)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--poll-interval-seconds", type=float, default=10.0)
     parser.add_argument(
@@ -158,7 +165,10 @@ def build_collector_checkpoint(item, asset, options, stats, source_object, raw_r
 
 def process_item(connection, item, cli_args):
     """KIS item 하나를 raw 수집까지만 처리하고 RAW_OBJECT_READY 이벤트 생성을 요청한다."""
-    from collectors.kis_client import KISClient
+    if getattr(cli_args, "request_policy", "legacy") == "coordinated-v1":
+        from workers.coordinated_collector import process
+        return process(connection, item, cli_args, "KIS")
+    from collectors.policy_clients import kis_client, policy_checkpoint
 
     asset_id = parse_asset_id(item.item_key)
     asset = load_asset(connection, asset_id)
@@ -187,17 +197,22 @@ def process_item(connection, item, cli_args):
         )
 
     storage = build_storage(cli_args.output_dir, item)
-    client = KISClient.from_env(min_request_interval=options["request_interval"])
+    client = kis_client(getattr(cli_args, "request_policy", "legacy"),
+                        min_request_interval=options["request_interval"])
     collected_at = datetime.now(timezone.utc)
 
-    result = client.get_daily_prices(
-        exchange_code=asset["provider_exchange_code"],
-        symbol=asset["provider_symbol"],
-        start_date=options["start_date"],
-        end_date=options["end_date"],
-        adjusted=options["adjusted"],
-        max_pages=options["max_pages"],
-    )
+    try:
+        result = client.get_daily_prices(
+            exchange_code=asset["provider_exchange_code"],
+            symbol=asset["provider_symbol"],
+            start_date=options["start_date"],
+            end_date=options["end_date"],
+            adjusted=options["adjusted"],
+            max_pages=options["max_pages"],
+        )
+        request_checkpoint = policy_checkpoint(client)
+    finally:
+        client.session.close()
     source_object = write_raw_pages(storage, asset, options, result, collected_at)
     write_collector_previews(storage, source_object)
 
@@ -223,6 +238,7 @@ def process_item(connection, item, cli_args):
         source_object,
         raw_ready_event,
     )
+    checkpoint.update(request_checkpoint)
     return complete_item(connection, item.item_id, "COLLECTED", checkpoint=checkpoint)
 
 
@@ -246,30 +262,47 @@ def print_claimed_item(item):
 
 def run_once(connection, args):
     """QUEUED KIS item 하나를 collector-only 방식으로 처리한다."""
-    item = claim_next_queued_item(
-        connection,
-        source="KIS",
-        job_type=args.job_type.upper() if args.job_type else None,
-    )
+    coordinated = getattr(args, "request_policy", "legacy") == "coordinated-v1"
+    if coordinated:
+        from workers.coordinated_collector import claim
+
+        item = claim(connection, args, "KIS")
+    else:
+        item = claim_next_queued_item(
+            connection,
+            source="KIS",
+            job_type=args.job_type.upper() if args.job_type else None,
+        )
     if item is None:
         print("claimed=false")
         print("message=조건에 맞는 QUEUED KIS pipeline_job_item이 없습니다")
         return False
 
-    print_claimed_item(item)
+    if coordinated:
+        print(f"claimed=true item_id={item.item_id} mode=coordinated-v1")
+    else:
+        print_claimed_item(item)
     try:
         next_job_status = process_item(connection, item, args)
         print("processed=true")
         print(f"next_job_status={next_job_status}")
     except Exception as error:
+        if coordinated:
+            from pipeline.durable_requests import CoordinationError
+            connection.rollback()
+            LOGGER.error("Coordinated KIS collection held item_id=%s; no unfenced failure write", item.item_id)
+            raise CoordinationError(error.code if isinstance(error, CoordinationError) else "review_required") from None
         LOGGER.exception("KIS collector item failed item_id=%s", item.item_id)
         connection.rollback()
+        checkpoint = {"worker": "kis_price_collector", "item_key": item.item_key}
+        if isinstance(error, RequestPolicyError):
+            checkpoint["requestPolicy"] = error.metadata()
         next_job_status = fail_item(
             connection,
             item.item_id,
             "KIS_COLLECTOR_FAILED",
             str(error),
-            checkpoint={"worker": "kis_price_collector", "item_key": item.item_key},
+            checkpoint=checkpoint,
         )
         print("processed=false")
         print(f"next_job_status={next_job_status}")

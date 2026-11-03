@@ -32,6 +32,11 @@ def dispatch_item(connection, item):
         return _dispatch_sec(connection, item, pipeline_mode)
     if source == "KIS":
         return _dispatch_kis(connection, item, pipeline_mode)
+    if source == "NEWS":
+        if pipeline_mode != COLLECT_ONLY:
+            raise ValueError("NEWS requires COLLECT_ONLY")
+        from workers.news_collector import process_item
+        return process_item(connection, item)
     raise ValueError(f"지원하지 않는 Kafka worker source입니다: {item.source}")
 
 

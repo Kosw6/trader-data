@@ -428,6 +428,7 @@ def collect_sec_financial_payloads(client, storage, target, args, collected_at):
         "filing": filing_records,
         "financial_fact": financial_fact_records,
         "company_facts_missing": company_facts_missing,
+        "raw_payloads674": [(facts_source, company_facts)] if company_facts is not None else [],
     }
 
 
@@ -750,6 +751,12 @@ def apply_company_financials(connection, target, records, processed_at, stats, s
                     fact,
                     processed_at,
                 )
+        from pipeline.financial_mapping667 import enqueue_if_enabled
+        enqueue_if_enabled(cursor, target["company_id"])
+        # Queue row -> company advisory lock matches mapper lock ordering.
+        # The queue and its raw proof become visible together only at commit.
+        from pipeline.financial_history674 import capture_collected_evidence
+        capture_collected_evidence(cursor, target, records)
     connection.commit()
 
 

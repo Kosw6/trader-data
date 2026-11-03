@@ -43,6 +43,11 @@ class KISClient:
             "TraderDataBot-KR/1.0",
             total_retries=max_retries,
         )
+        if max_retries == 0:
+            # Return the first failed HTTP response, instead of losing its status
+            # inside urllib3 MaxRetryError -> requests RetryError (even at zero retries).
+            for adapter in self.session.adapters.values():
+                adapter.max_retries = adapter.max_retries.new(raise_on_status=False)
 
     @classmethod
     def from_env(cls, **overrides):
@@ -64,8 +69,11 @@ class KISClient:
     def _request(self, method, url, **kwargs):
         """공통 timeout과 요청 간격을 적용한 뒤 HTTP 오류를 호출자에게 전달한다."""
         self._wait_for_rate_limit()
-        response = self.session.request(method, url, timeout=self.timeout, **kwargs)
-        self.last_request_at = time.monotonic()
+        try:
+            response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+        finally:
+            # Pace failed requests too; exceptions must not create an unpaced burst.
+            self.last_request_at = time.monotonic()
         response.raise_for_status()
         return response
 

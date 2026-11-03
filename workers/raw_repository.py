@@ -308,6 +308,9 @@ def local_path_from_source_object(source_object):
 
 def read_raw_payload(source_object):
     """source_object가 가리키는 raw JSON 파일을 읽어 dict로 반환한다."""
+    if source_object["storage_backend"] == "S3":
+        from collectors.s3_raw import read_json
+        return read_json(source_object)
     path = local_path_from_source_object(source_object)
     if not path.exists():
         raise FileNotFoundError(f"raw file does not exist: {path}")

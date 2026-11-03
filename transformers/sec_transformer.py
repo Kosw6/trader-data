@@ -138,11 +138,12 @@ def _column_value(columns, name, index):
     return values[index] if index < len(values) else None
 
 
-def transform_filings(submissions, filing_pages, raw_object_uri, collected_at):
+def transform_filings(submissions, filing_pages, raw_object_uri, collected_at, *, allowed_forms=None):
     """최근·과거 submissions 페이지를 10-K·10-Q·8-K filing 레코드로 변환한다."""
     cik = str(submissions.get("cik", "")).zfill(10)
     records = []
     seen = set()
+    forms = TARGET_FORMS if allowed_forms is None else frozenset(allowed_forms)
 
     for columns in filing_pages:
         accession_numbers = columns.get("accessionNumber") or []
@@ -150,7 +151,7 @@ def transform_filings(submissions, filing_pages, raw_object_uri, collected_at):
             if accession_number in seen:
                 continue
             form = _column_value(columns, "form", index) or ""
-            if normalize_form(form) not in TARGET_FORMS:
+            if normalize_form(form) not in forms:
                 continue
 
             primary_document = _column_value(columns, "primaryDocument", index)
@@ -194,13 +195,20 @@ def transform_financial_facts(
     raw_object_uri,
     collected_at,
     core_metrics_only=True,
+    *,
+    allowed_forms=None,
+    allowed_taxonomies=None,
 ):
     """Company Facts를 원본 태그를 보존한 financial_fact 레코드로 변환한다."""
     cik = str(company_facts.get("cik", "")).zfill(10)
     records = []
     seen_hashes = set()
+    forms = TARGET_FORMS if allowed_forms is None else frozenset(allowed_forms)
+    taxonomies = None if allowed_taxonomies is None else frozenset(allowed_taxonomies)
 
     for taxonomy, concepts in (company_facts.get("facts") or {}).items():
+        if taxonomies is not None and taxonomy not in taxonomies:
+            continue
         for source_tag, concept in concepts.items():
             metric_code = TAG_TO_METRIC.get(source_tag)
             if core_metrics_only and metric_code is None:
@@ -209,7 +217,7 @@ def transform_financial_facts(
             for unit, facts in (concept.get("units") or {}).items():
                 for fact in facts:
                     form = fact.get("form") or ""
-                    if normalize_form(form) not in TARGET_FORMS:
+                    if normalize_form(form) not in forms:
                         continue
                     if (
                         fact.get("val") is None

@@ -11,7 +11,8 @@ from backfills.sec_financial.backfill import (
     collect_sec_financial_payloads,
     require_user_agent,
 )
-from collectors.sec_client import SECClient
+from collectors.policy_clients import policy_checkpoint, sec_client
+from pipeline.request_policy import RequestPolicyError
 from workers.db import connect_database
 from workers.job_repository import claim_next_queued_item, complete_item, fail_item
 from workers.raw_repository import report_raw_ready, upsert_collected_source_object
@@ -39,7 +40,12 @@ def parse_args():
     parser.add_argument("--include-history", action="store_true")
     parser.add_argument("--all-facts", action="store_true")
     parser.add_argument("--request-interval", type=float, default=1.0)
+    parser.add_argument("--request-policy", choices=("legacy", "bounded-v1", "coordinated-v1"), default="legacy",
+                        help="Opt-in bounded HTTP policy; existing jobs keep legacy behavior.")
     parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--recovery-manifest")
+    parser.add_argument("--recovery-manifest-sha256")
+    parser.add_argument("--recovery-item-id", type=int)
     parser.add_argument("--poll-interval-seconds", type=float, default=10.0)
     parser.add_argument(
         "--controller-url",
@@ -100,6 +106,9 @@ def build_checkpoint(item, target, backfill_args, stats, raw_ready_event):
 
 def process_item(connection, item, cli_args):
     """SEC item 하나를 수집 전용 흐름으로 처리한다."""
+    if getattr(cli_args, "request_policy", "legacy") == "coordinated-v1":
+        from workers.coordinated_collector import process
+        return process(connection, item, cli_args, "SEC")
     target, target_ref = load_single_target(connection, item.item_key)
     if target is None:
         return complete_item(
@@ -117,21 +126,26 @@ def process_item(connection, item, cli_args):
 
     backfill_args = build_backfill_args(item, cli_args)
     storage = build_storage(backfill_args.output_dir, item)
-    client = SECClient(
-        require_user_agent(),
+    client = sec_client(
+        getattr(cli_args, "request_policy", "legacy"),
+        user_agent=require_user_agent(),
         min_request_interval=backfill_args.request_interval,
     )
 
     from datetime import datetime, timezone
 
     collected_at = datetime.now(timezone.utc)
-    records = collect_sec_financial_payloads(
-        client,
-        storage,
-        target,
-        backfill_args,
-        collected_at,
-    )
+    try:
+        records = collect_sec_financial_payloads(
+            client,
+            storage,
+            target,
+            backfill_args,
+            collected_at,
+        )
+        request_checkpoint = policy_checkpoint(client)
+    finally:
+        client.session.close()
     write_table_previews(storage, records)
 
     stats = Counter()
@@ -154,6 +168,7 @@ def process_item(connection, item, cli_args):
     stats["financial_fact_preview"] = len(records["financial_fact"])
     stats["company_facts_missing"] = int(bool(records.get("company_facts_missing")))
     checkpoint = build_checkpoint(item, target, backfill_args, stats, raw_ready_event)
+    checkpoint.update(request_checkpoint)
     return complete_item(connection, item.item_id, "COLLECTED", checkpoint=checkpoint)
 
 
@@ -177,30 +192,47 @@ def print_claimed_item(item):
 
 def run_once(connection, args):
     """QUEUED SEC item 하나를 collector-only 방식으로 처리한다."""
-    item = claim_next_queued_item(
-        connection,
-        source="SEC",
-        job_type=args.job_type.upper() if args.job_type else None,
-    )
+    coordinated = getattr(args, "request_policy", "legacy") == "coordinated-v1"
+    if coordinated:
+        from workers.coordinated_collector import claim
+
+        item = claim(connection, args, "SEC")
+    else:
+        item = claim_next_queued_item(
+            connection,
+            source="SEC",
+            job_type=args.job_type.upper() if args.job_type else None,
+        )
     if item is None:
         print("claimed=false")
         print("message=조건에 맞는 QUEUED SEC pipeline_job_item이 없습니다")
         return False
 
-    print_claimed_item(item)
+    if coordinated:
+        print(f"claimed=true item_id={item.item_id} mode=coordinated-v1")
+    else:
+        print_claimed_item(item)
     try:
         next_job_status = process_item(connection, item, args)
         print("processed=true")
         print(f"next_job_status={next_job_status}")
     except Exception as error:
+        if coordinated:
+            from pipeline.durable_requests import CoordinationError
+            connection.rollback()
+            LOGGER.error("Coordinated SEC collection held item_id=%s; no unfenced failure write", item.item_id)
+            raise CoordinationError(error.code if isinstance(error, CoordinationError) else "review_required") from None
         LOGGER.exception("SEC collector item failed item_id=%s", item.item_id)
         connection.rollback()
+        checkpoint = {"worker": "sec_financial_collector", "item_key": item.item_key}
+        if isinstance(error, RequestPolicyError):
+            checkpoint["requestPolicy"] = error.metadata()
         next_job_status = fail_item(
             connection,
             item.item_id,
             "SEC_COLLECTOR_FAILED",
             str(error),
-            checkpoint={"worker": "sec_financial_collector", "item_key": item.item_key},
+            checkpoint=checkpoint,
         )
         print("processed=false")
         print(f"next_job_status={next_job_status}")
